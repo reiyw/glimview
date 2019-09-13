@@ -21,4 +21,4 @@ export VOCAB_REL=$2
 export MODEL_DIR=$3
 export PATH_FILE=${4:-""}
 
-pipenv run flask run
+pipenv run flask run --host 0.0.0.0
