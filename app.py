@@ -9,7 +9,10 @@ from glimview.ModelKB import Model
 app = Flask(__name__, template_folder="./dist")
 app.config.from_mapping(
     MODEL=Model(
-        os.environ["VOCAB_ENT"], os.environ["VOCAB_REL"], os.environ["MODEL_DIR"]
+        os.environ["VOCAB_ENT"],
+        os.environ["VOCAB_REL"],
+        os.environ["MODEL_DIR"],
+        os.environ["PATH_FILE"],
     )
 )
 CORS(app, resources={r"/api/*": {"origins": "*"}})
@@ -27,20 +30,24 @@ def get_relations():
 
 @app.route("/api/query", methods=["POST"])
 def query():
+    # TODO: ModelKB.Model のメソッドにする
     model: Model = app.config["MODEL"]
     expr = []
     for i, triple in enumerate(request.json):
         if i > 0:
-            expr.append(" + ")
+            expr.append(" ＋ ")
         expr.append(f"trans({triple['head']}, {triple['relation']})")
         if triple["tail"]:
-            expr.append(f" + {triple['tail']}")
-
-    tsim = model.tvecs.dot(model.calc("".join(expr)))
-    top_inds = np.argpartition(tsim, -20)[-20:]
-    most_similar = sorted(
-        [(tsim[i], model.list_word[i]) for i in top_inds], reverse=True
-    )
+            expr.append(f" ＋ {triple['tail']}")
+    vec = model.calc("".join(expr))
+    targets = model.list_word
+    sims = model.tvecs.dot(vec)
+    if model.sim_with_path:
+        path_sims = model.path_vecs.dot(vec)
+        sims = np.hstack((sims, path_sims))
+        targets.extend(model.paths)
+    top_inds = np.argpartition(sims, -20)[-20:]
+    most_similar = sorted([(sims[i], targets[i]) for i in top_inds], reverse=True)
     return jsonify([dict(target=tgt, similarity=sim) for sim, tgt in most_similar])
 
 

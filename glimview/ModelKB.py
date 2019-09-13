@@ -7,10 +7,11 @@ import sys
 import numpy as np
 
 from .utilityFuncs import readerLine, show_top, split_wrt_brackets
+from .util import build_path_expr
 
 
 class Model(object):
-    def __init__(self, words, roles, path):
+    def __init__(self, words, roles, path, path_file):
         # load lexicon
         self.list_word = [line.split("\t", 1)[0] for line in readerLine(words)]
         self.dict_word = dict((s, i) for i, s in enumerate(self.list_word))
@@ -83,6 +84,21 @@ class Model(object):
 
         self.msteps = np.loadtxt(path + "msteps.txt", dtype=np.uint)
 
+        if os.path.exists(path_file):
+            paths = []
+            path_vecs = []
+            for path_repr in open(path_file):
+                path_repr = path_repr.rstrip()
+                expr = build_path_expr(path_repr.split("\t"))
+                vec = self.calc(expr)
+                paths.append(path_repr)
+                path_vecs.append(vec)
+            self.paths = paths
+            self.path_vecs = np.asarray(path_vecs)
+            self.sim_with_path = True
+        else:
+            self.sim_with_path = False
+
         print(
             "Loaded model. # of relations: {}  # of entities: {}".format(
                 len(list_role_pre), len(self.list_word)
@@ -101,7 +117,8 @@ class Model(object):
 
     def calc(self, expr):
         tosum = []
-        for pre in split_wrt_brackets(expr, "+"):
+        # TODO: "＋" の代わりの記号／仕組み
+        for pre in split_wrt_brackets(expr, "＋"):
             s = pre.strip()
             if s.startswith("trans(") and s.endswith(")"):
                 ss, r = s[len("trans(") : -len(")")].rsplit(", ", 1)
