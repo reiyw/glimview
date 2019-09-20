@@ -1,12 +1,12 @@
 import os
 
 import numpy as np
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request, send_from_directory
 from flask_cors import CORS
 
 from glimview.ModelKB import Model
 
-app = Flask(__name__, template_folder="./dist")
+app = Flask(__name__, static_url_path="", static_folder="dist", template_folder="dist")
 app.config.from_mapping(
     MODEL=Model(
         os.environ["VOCAB_ENT"],
