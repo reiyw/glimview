@@ -3,11 +3,13 @@ from __future__ import absolute_import, division, print_function
 import json
 import os
 import sys
+import warnings
+from typing import List, Union
 
 import numpy as np
 
 from .utilityFuncs import readerLine, show_top, split_wrt_brackets
-from .util import build_path_expr
+from .util import build_path_expr, chunked
 
 
 class Model(object):
@@ -88,10 +90,9 @@ class Model(object):
             paths = []
             path_vecs = []
             for path_repr in open(path_file):
-                path_repr = path_repr.rstrip()
-                expr = build_path_expr(path_repr.split("\t"))
-                vec = self.calc(expr)
+                path_repr = path_repr.rstrip("\n")
                 paths.append(path_repr)
+                vec = self.calc_phrase_from_path_with_entities(path_repr.split("\t"))
                 path_vecs.append(vec)
             self.paths = paths
             self.path_vecs = np.asarray(path_vecs)
@@ -106,27 +107,39 @@ class Model(object):
             file=sys.stderr,
         )
 
-    def get_word_vec(self, word):
-        return self.tvecs[self.dict_word[word]]
+    def get_word_vector(self, word: str, backoff_to_zero_vector=False) -> np.ndarray:
+        if backoff_to_zero_vector and word not in self.dict_word:
+            return np.zeros(self.dim)
+        else:
+            return self.tvecs[self.dict_word[word]]
 
-    def trans(self, v, role):
-        m = self.mats[self.dict_role[role]]
+    def get_relation_matrix(
+        self, role: str, backoff_to_identity_matrix=False
+    ) -> np.ndarray:
+        if not role.endswith("<") and not role.endswith(">"):
+            raise ValueError(f'role must end with ">" or "<": {role}')
+
+        if backoff_to_identity_matrix and role not in self.dict_role:
+            return np.identity(self.dim)
+        else:
+            return self.mats[self.dict_role[role]]
+
+    def trans(self, v: np.ndarray, m: np.ndarray) -> np.ndarray:
         v = m.dot(v)
         v /= np.sqrt(np.sum(np.square(v)))
         return v
 
-    def calc(self, expr):
+    def calc(self, expr, addition_symbol="+"):
         tosum = []
-        # TODO: "＋" の代わりの記号／仕組み
-        for pre in split_wrt_brackets(expr, "＋"):
+        for pre in split_wrt_brackets(expr, addition_symbol):
             s = pre.strip()
             if s.startswith("trans(") and s.endswith(")"):
                 ss, r = s[len("trans(") : -len(")")].rsplit(", ", 1)
-                tosum.append(self.trans(self.calc(ss), r))
+                tosum.append(self.trans(self.calc(ss), self.get_relation_matrix(r)))
             elif s.startswith("(") and s.endswith(")"):
                 tosum.append(self.calc(s[1:-1]))
             else:
-                tosum.append(self.get_word_vec(s))
+                tosum.append(self.get_word_vector(s))
         ret = np.sum(tosum, axis=0)
         ret /= np.sqrt(np.sum(np.square(ret)))
         return ret
@@ -216,3 +229,110 @@ class Model(object):
         prj = self.mats[self.dict_role[r]]
         prj_code = code_relu(self.encoder.dot(prj.flatten()))
         return prj_code
+
+    def _get_word_vector_if_str(
+        self, word_or_vec: Union[str, np.ndarray], backoff_to_zero_vector
+    ) -> np.ndarray:
+        if isinstance(word_or_vec, str):
+            return self.get_word_vector(
+                word_or_vec, backoff_to_zero_vector=backoff_to_zero_vector
+            )
+        else:
+            return word_or_vec
+
+    def calc_phrase_from_path(
+        self, path: List[Union[str, np.ndarray]], ignore_oov=True
+    ) -> np.ndarray:
+        """Calculate composed pharase vector from a path.
+        
+        Given path (w1, r1, ..., rk, w2), this method calculates:
+            R(rk) * ... * R(r1) * v(w1) + v(w2)
+        
+        If a word and a relation are OOV, we use a zero vector and an identity matrix instead, respectively.
+        """
+        if len(path) < 3:
+            raise ValueError(f"Path length must be larger than 2: {path}")
+
+        s = path[0]
+        t = path[-1]
+        if (
+            isinstance(s, str)
+            and isinstance(t, str)
+            and s not in self.dict_word
+            and t not in self.dict_word
+        ):
+            warnings.warn(
+                f"both {s} and {t} don't appear in the vocab. "
+                "The result should be filled with nan.",
+                UserWarning,
+            )
+
+        v = self._get_word_vector_if_str(s, backoff_to_zero_vector=ignore_oov)
+        for role in path[1:-1]:
+            m = self.get_relation_matrix(role, backoff_to_identity_matrix=ignore_oov)
+            v = self.trans(v, m)
+
+        v += self._get_word_vector_if_str(t, backoff_to_zero_vector=ignore_oov)
+        v /= np.sqrt(np.sum(np.square(v)))
+
+        return v
+
+    def calc_phrase_from_path_with_entities(
+        self, path: List[Union[str, np.ndarray]], ignore_oov=True
+    ) -> np.ndarray:
+        if len(path) < 3:
+            raise ValueError(f"Path length must be larger than 2: {path}")
+
+        v = self._get_word_vector_if_str(path[0], backoff_to_zero_vector=ignore_oov)
+        for role, ent in chunked(path[1:], 2):
+            m = self.get_relation_matrix(role, backoff_to_identity_matrix=ignore_oov)
+            v = self.trans(v, m)
+            v += self._get_word_vector_if_str(ent, backoff_to_zero_vector=ignore_oov)
+            v /= np.sqrt(np.sum(np.square(v)))
+
+        return v
+
+    def calc_phrase_from_triples(self, triples, ignore_oov=True):
+        """Calculate composed pharase vector from triples.
+        
+        Given triples (w1, r1, w2) and (w3, r2, w4), this method calculates:
+            R(r1) * v(w1) + v(w2) + R(r2) * v(w3) + v(w4)
+
+        Tail entities (w2 and w4 in this example) may be omitted.
+        """
+        vec = np.zeros(self.dim)
+        for head, rel, *tail in triples:
+            v = self._get_word_vector_if_str(head, backoff_to_zero_vector=ignore_oov)
+            m = self.get_relation_matrix(rel, backoff_to_identity_matrix=ignore_oov)
+            v = self.trans(v, m)
+            if tail and tail[0]:
+                v += self._get_word_vector_if_str(
+                    tail[0], backoff_to_zero_vector=ignore_oov
+                )
+            v /= np.sqrt(np.sum(np.square(v)))
+            vec += v
+        vec /= np.sqrt(np.sum(np.square(vec)))
+        return vec
+
+    def get_average_word_vector(self, words: List[str], skip_oov=True):
+        """
+        Patameters
+        ----------
+        skip_oov : ``bool``, optional (default=``True``)
+            If set to False, it raises KeyError when words contain OOV word.
+        """
+        vecs = []
+        for word in words:
+            if not skip_oov or word in self.dict_word:
+                vecs.append(self.get_word_vector(word))
+
+        if not vecs:
+            warnings.warn(
+                "cannot calculate the average word vector "
+                f"because any words ({words}) are not in the vocab. "
+                "Return zero vector.",
+                UserWarning,
+            )
+            return np.zeros(self.dim)
+
+        return np.average(vecs, axis=0)

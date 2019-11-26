@@ -30,16 +30,9 @@ def get_relations():
 
 @app.route("/api/query", methods=["POST"])
 def query():
-    # TODO: ModelKB.Model のメソッドにする
     model: Model = app.config["MODEL"]
-    expr = []
-    for i, triple in enumerate(request.json):
-        if i > 0:
-            expr.append(" ＋ ")
-        expr.append(f"trans({triple['head']}, {triple['relation']})")
-        if triple["tail"]:
-            expr.append(f" ＋ {triple['tail']}")
-    vec = model.calc("".join(expr))
+    triples = [(tri["head"], tri["relation"], tri["tail"]) for tri in request.json]
+    vec = model.calc_phrase_from_triples(triples)
     targets = model.list_word
     sims = model.tvecs.dot(vec)
     if model.sim_with_path:
